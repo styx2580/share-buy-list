@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>共享购买清单</title>
+  <style>
+    :root{--blue:#d9eef8;--line:#8fb5d0;--ink:#173a52;--muted:#64748b;--bg:#f5f9fc;--white:#fff}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);font:15px/1.45 system-ui,"Microsoft YaHei",sans-serif;color:#24364b}
+    .wrap{max-width:1180px;margin:28px auto;padding:0 18px}.top{display:flex;gap:14px;align-items:center;justify-content:space-between;margin-bottom:16px}
+    h1{margin:0;font-size:26px;color:var(--ink)}.sub{color:var(--muted);margin-top:4px}.actions{display:flex;gap:8px;flex-wrap:wrap}
+    button{border:1px solid #8fb5d0;background:white;color:var(--ink);border-radius:9px;padding:9px 14px;cursor:pointer;font-weight:650}
+    button.primary{background:#287aaa;color:#fff;border-color:#287aaa}button.danger{color:#a33;border-color:#e7b7b7}.status{font-size:13px;color:var(--muted);margin:0 0 10px}
+    .card{background:white;border-radius:14px;box-shadow:0 8px 28px #254b6814;overflow:auto;border:1px solid #d8e7f0}
+    table{width:100%;border-collapse:collapse;min-width:1160px;table-layout:fixed}th,td{border:1px solid var(--line);padding:0}
+    th{height:55px;background:var(--blue);color:var(--ink);font-size:16px;text-align:center;padding:8px}td{height:64px;background:#fff}
+    th:nth-child(1){width:15%}th:nth-child(2){width:11%}th:nth-child(3){width:15%}th:nth-child(4){width:18%}th:nth-child(5){width:13%}th:nth-child(6){width:28%}
+    input,textarea{width:100%;height:100%;min-height:63px;border:0;background:transparent;padding:10px 12px;font:inherit;color:inherit;outline:none}
+    textarea{resize:vertical;display:block}input[type="date"]{padding-left:14px;padding-right:14px;font-size:15px}input:focus,textarea:focus{box-shadow:inset 0 0 0 2px #3188ba;background:#f8fdff}
+    .approvals{padding:8px}.approval{display:grid;grid-template-columns:34% 1fr;gap:6px;margin-bottom:7px}.approval input,.approval textarea{min-height:48px;border:1px solid #b9d3e3;border-radius:7px}.add-approval{width:100%;padding:7px 9px;font-size:13px;background:#eef8fd;border-style:dashed}
+    .foot{display:flex;justify-content:space-between;gap:12px;align-items:center;color:var(--muted);font-size:13px;margin-top:12px}.room{font-family:ui-monospace,monospace}
+    dialog{border:0;border-radius:16px;padding:0;max-width:620px;width:calc(100% - 32px);box-shadow:0 24px 80px #173a5250}dialog::backdrop{background:#173a5266}
+    .modal{padding:24px}.modal h2{margin:0 0 8px;color:var(--ink)}.modal p{color:var(--muted)}.modal textarea{border:1px solid #bfd3df;border-radius:9px;height:170px;font-family:ui-monospace,monospace;font-size:12px}
+    .modal .row{display:flex;justify-content:flex-end;gap:8px;margin-top:15px}.notice{background:#eef8fd;border-left:4px solid #3188ba;padding:10px 12px;border-radius:6px;font-size:13px}
+    @media(max-width:720px){.top{align-items:flex-start;flex-direction:column}h1{font-size:22px}.wrap{margin-top:18px}}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="top"><div><h1>共享购买清单</h1><div class="sub">大家一起记录，内容会自动保存和同步</div></div><div class="actions"><button id="add">＋ 添加一行</button><button id="share" class="primary">复制分享链接</button><button id="setup">云端设置</button></div></div>
+    <p class="status" id="status">正在准备…</p>
+    <section class="card"><table><thead><tr><th>时间</th><th>申请人</th><th>想买啥</th><th>理由</th><th>是否有替代品</th><th>多人审批（审批人及理由）</th></tr></thead><tbody id="body"></tbody></table></section>
+    <div class="foot"><span>更改后约 0.5 秒自动保存</span><span>房间：<b class="room" id="room"></b></span></div>
+  </main>
+  <dialog id="dialog"><div class="modal"><h2>连接多人同步</h2><p>粘贴 Firebase 项目设置里的 Web App 配置（JSON 格式）。配置会写入分享链接，其他人打开后即可进入同一张表。</p><div class="notice">Firebase 控制台需启用 Realtime Database。Web 配置不是管理员密钥，但数据库规则必须只开放你愿意共享的数据。</div><textarea id="config" spellcheck="false" placeholder='{"apiKey":"...","authDomain":"...","databaseURL":"https://...","projectId":"...","appId":"..."}'></textarea><div class="row"><button id="cancel">取消</button><button id="saveConfig" class="primary">保存并连接</button></div></div></dialog>
+  <script type="module">
+    const $=s=>document.querySelector(s), body=$('#body'), status=$('#status');
+    const params=new URLSearchParams(location.hash.slice(1));
+    const roomId=params.get('room')||crypto.randomUUID().slice(0,8); $('#room').textContent=roomId;
+    let rows=[], db=null, api=null, timer=null, pendingRender=false, pendingWrites={};
+    const blankApproval=()=>({name:'',reason:''});
+    const blank=()=>({time:'',applicant:'',item:'',reason:'',alternative:'',approvals:[blankApproval()]});
+    const normalize=r=>({...blank(),...r,approvals:Array.isArray(r.approvals)&&r.approvals.length?r.approvals:(r.approved?[{name:'',reason:r.approved}]:[blankApproval()])});
+    const encode=o=>btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+    const decode=s=>JSON.parse(decodeURIComponent(escape(atob(s.replace(/-/g,'+').replace(/_/g,'/')))));
+    let cfg=null; try{cfg=params.get('cfg')?decode(params.get('cfg')):JSON.parse(localStorage.getItem('buy-list-firebase')||'null')}catch{}
+    function render(){body.innerHTML=''; rows=rows.map(normalize);rows.forEach((r,i)=>{const tr=document.createElement('tr');
+      const approvalHtml=r.approvals.map((a,j)=>`<div class="approval"><input data-a="name" data-j="${j}" value="${esc(a.name)}" placeholder="审批人"><textarea data-a="reason" data-j="${j}" placeholder="审批理由">${esc(a.reason)}</textarea></div>`).join('');
+      tr.innerHTML=`<td><input type="date" data-k="time" value="${esc(r.time)}"></td><td><textarea data-k="applicant" placeholder="填写申请人">${esc(r.applicant)}</textarea></td><td><textarea data-k="item" placeholder="填写想买的物品">${esc(r.item)}</textarea></td><td><textarea data-k="reason" placeholder="填写购买理由">${esc(r.reason)}</textarea></td><td><textarea data-k="alternative" placeholder="填写替代品情况">${esc(r.alternative)}</textarea></td><td><div class="approvals">${approvalHtml}<button class="add-approval" type="button">＋ 添加一位审批人</button></div></td>`;
+      tr.querySelectorAll('[data-k]').forEach(el=>el.addEventListener('input',()=>{rows[i][el.dataset.k]=el.value;scheduleSave(`rooms/${roomId}/rows/${i}/${el.dataset.k}`,el.value)}));
+      tr.querySelectorAll('[data-a]').forEach(el=>el.addEventListener('input',()=>{const j=Number(el.dataset.j);rows[i].approvals[j][el.dataset.a]=el.value;scheduleSave(`rooms/${roomId}/rows/${i}/approvals/${j}/${el.dataset.a}`,el.value)}));
+      tr.querySelector('.add-approval').onclick=()=>{rows[i].approvals.push(blankApproval());render();save()};body.appendChild(tr)});}
+    function esc(v=''){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+    async function scheduleSave(path,value){status.textContent=db?'正在保存…':'已保存在当前浏览器（设置云端后可多人同步）';if(path)pendingWrites[path]=value;clearTimeout(timer);timer=setTimeout(flushSave,500)}
+    async function flushSave(){if(db&&Object.keys(pendingWrites).length){const writes=pendingWrites;pendingWrites={};await api.update(api.ref(db),writes);status.textContent='已同步到云端'}else if(!db){localStorage.setItem(`buy-list-${roomId}`,JSON.stringify(rows));status.textContent='已保存在当前浏览器（设置云端后可多人同步）'}}
+    async function save(){if(db){await api.set(api.ref(db,`rooms/${roomId}/rows`),rows);status.textContent='已同步到云端'}else{localStorage.setItem(`buy-list-${roomId}`,JSON.stringify(rows));status.textContent='已保存在当前浏览器（设置云端后可多人同步）'}}
+    body.addEventListener('focusout',()=>setTimeout(()=>{if(pendingRender&&!body.contains(document.activeElement)){pendingRender=false;render()}},0));
+    async function connect(){if(!cfg){rows=JSON.parse(localStorage.getItem(`buy-list-${roomId}`)||'null')||Array.from({length:12},blank);render();status.textContent='当前为单机模式；点“云端设置”开启多人同步';return}
+      try{const appMod=await import('https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js');api=await import('https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js');db=api.getDatabase(appMod.initializeApp(cfg));
+        api.onValue(api.ref(db,`rooms/${roomId}/rows`),snap=>{const v=snap.val();if(v){rows=Array.isArray(v)?v:Object.values(v);if(body.contains(document.activeElement)){pendingRender=true}else{render()}}else{rows=Array.from({length:12},blank);save()}status.textContent='已连接 · 多人实时同步中'},e=>{status.textContent='连接失败：'+e.message});
+      }catch(e){status.textContent='连接失败：'+e.message}}
+    $('#add').onclick=()=>{rows.push(blank());render();save()};
+    $('#setup').onclick=()=>{$('#config').value=cfg?JSON.stringify(cfg,null,2):'';$('#dialog').showModal()};$('#cancel').onclick=()=>$('#dialog').close();
+    $('#saveConfig').onclick=()=>{try{cfg=JSON.parse($('#config').value);localStorage.setItem('buy-list-firebase',JSON.stringify(cfg));params.set('room',roomId);params.set('cfg',encode(cfg));history.replaceState(null,'','#'+params);$('#dialog').close();location.reload()}catch{alert('配置不是有效的 JSON，请检查后重试。')}};
+    $('#share').onclick=async()=>{if(!cfg){$('#dialog').showModal();return}params.set('room',roomId);params.set('cfg',encode(cfg));const url=location.href.split('#')[0]+'#'+params;await navigator.clipboard.writeText(url);status.textContent='分享链接已复制'};
+    if(!params.get('room')){params.set('room',roomId);history.replaceState(null,'','#'+params)} connect();
+  </script>
+</body>
+</html>
